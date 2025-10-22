@@ -23,7 +23,7 @@ class IndicTTSLLM:
         gemini_model="gemini-2.0-flash",
         batch_size=2,
         device=None,
-        gemini_api_key="AIzaSyD9LwoPXrkZx965g1Fn5XQ9TdcNH_cVP-U"
+        gemini_api_key="GEMINI_API_KEY"
     ):
         start_time = time.time()
         print(f"🔹 [{datetime.now().strftime('%H:%M:%S')}] Starting TTS initialization...")
