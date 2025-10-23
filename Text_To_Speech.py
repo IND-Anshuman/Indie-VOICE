@@ -9,6 +9,14 @@ from datetime import datetime
 from parler_tts import ParlerTTSForConditionalGeneration
 from transformers import AutoTokenizer
 from google import genai
+from dotenv import load_dotenv
+
+# Load environment variables from .env file
+# Look for .env file in the backend directory
+import pathlib
+backend_root = pathlib.Path(__file__).parent.parent.parent
+env_path = backend_root / '.env'
+load_dotenv(env_path)
 
 
 class IndicTTSLLM:
@@ -28,12 +36,55 @@ class IndicTTSLLM:
         start_time = time.time()
         print(f"🔹 [{datetime.now().strftime('%H:%M:%S')}] Starting TTS initialization...")
         
-        # CPU-friendly initialization
-        self.device = device or ("cuda:0" if torch.cuda.is_available() else "cpu")
+        # Smart device selection with memory optimization
+        if device is None:
+            if torch.cuda.is_available():
+                # Check GPU memory
+                gpu_memory = torch.cuda.get_device_properties(0).total_memory / (1024**3)
+                print(f"🔹 Detected GPU with {gpu_memory:.1f}GB memory")
+                
+                # Your integrated GPU setup - use GPU with optimizations
+                if gpu_memory >= 8.0:  # Your 8.8GB setup
+                    self.device = "cuda:0"
+                    self.use_mixed_precision = True
+                    print("🚀 Using GPU with mixed precision optimization")
+                elif gpu_memory >= 4.0:
+                    self.device = "cuda:0" 
+                    self.use_mixed_precision = True
+                    print("⚡ Using GPU with memory optimization")
+                else:
+                    self.device = "cpu"
+                    self.use_mixed_precision = False
+                    print("💻 GPU memory insufficient, using CPU")
+            else:
+                self.device = "cpu"
+                self.use_mixed_precision = False
+                print("💻 No GPU detected, using CPU")
+        else:
+            self.device = device
+            self.use_mixed_precision = device.startswith("cuda")
+        
         print(f"🔹 Initializing Indic Parler-TTS on device: {self.device}")
 
         self.batch_size = batch_size
         self.gemini_model = gemini_model
+        
+        # Auto-adjust batch size based on device capabilities
+        if self.device.startswith("cuda"):
+            gpu_memory = torch.cuda.get_device_properties(0).total_memory / (1024**3)
+            if gpu_memory >= 8.0:  # Your setup
+                self.batch_size = min(batch_size, 3)  # Conservative for integrated GPU
+                print(f"🔧 GPU batch size optimized to: {self.batch_size}")
+            elif gpu_memory >= 4.0:
+                self.batch_size = min(batch_size, 2)
+                print(f"🔧 GPU batch size optimized to: {self.batch_size}")
+            else:
+                self.batch_size = 1
+                print(f"🔧 GPU batch size limited to: {self.batch_size}")
+        else:
+            # CPU can handle larger batches due to system RAM
+            self.batch_size = batch_size
+            print(f"💻 CPU batch size: {self.batch_size}")
 
         # Initialize Gemini client
         gemini_start = time.time()
@@ -43,10 +94,31 @@ class IndicTTSLLM:
         self.llm = genai.Client(api_key=gemini_api_key)
         print(f"✅ Gemini client initialized in {time.time() - gemini_start:.2f}s")
 
-        # Load model and tokenizers
+        # Load model and tokenizers with GPU optimization
         model_start = time.time()
         print("🔹 Loading Indic Parler-TTS model...")
-        self.model = ParlerTTSForConditionalGeneration.from_pretrained(tts_model).to(self.device)
+        
+        if self.device.startswith("cuda"):
+            # GPU optimization for your integrated GPU setup
+            print("🔧 Applying GPU memory optimizations...")
+            torch.cuda.empty_cache()  # Clear any existing GPU memory
+            
+            # Load model with optimizations
+            self.model = ParlerTTSForConditionalGeneration.from_pretrained(
+                tts_model,
+                torch_dtype=torch.float16 if self.use_mixed_precision else torch.float32,
+                low_cpu_mem_usage=True
+            ).to(self.device)
+            
+            # Monitor GPU memory usage
+            if torch.cuda.is_available():
+                memory_allocated = torch.cuda.memory_allocated(0) / (1024**3)
+                memory_reserved = torch.cuda.memory_reserved(0) / (1024**3)
+                print(f"📊 GPU Memory - Allocated: {memory_allocated:.2f}GB, Reserved: {memory_reserved:.2f}GB")
+        else:
+            # CPU loading
+            self.model = ParlerTTSForConditionalGeneration.from_pretrained(tts_model).to(self.device)
+            
         print(f"✅ Model loaded in {time.time() - model_start:.2f}s")
         
         tokenizer_start = time.time()
@@ -89,7 +161,7 @@ When generating the expanded description:
 Generate only the detailed voice description — do not add extra commentary."""
         )
 
-        user_prompt = f"Voice cue: {short_prompt}. Expand it(not descriptively) for a TTS model such that it does not exceeds maximum 256 charecters"
+        user_prompt = f"Voice cue: {short_prompt}. Make a small prompt for a TTS model such that it does not exceeds maximum 256 charecters"
 
         response = self.llm.models.generate_content(
             model=self.gemini_model,
@@ -136,26 +208,16 @@ Generate only the detailed voice description — do not add extra commentary."""
     # --------------------------
     # Audio normalization helper
     # --------------------------
-    def _normalize_rms(self, wav, target_db=-12.0, prevent_clipping=True):
-        """Normalize audio with clipping prevention."""
-        # Calculate RMS and target level
-        rms = np.sqrt(np.mean(wav ** 2))
-        target = 10 ** (target_db / 20.0)
-        
-        if rms > 0:
-            # Calculate gain needed
-            gain = target / (rms + 1e-9)
-            wav = wav * gain
-            
-            # Prevent clipping by reducing gain if needed
-            if prevent_clipping:
-                peak = np.max(np.abs(wav))
-                if peak > 0.95:  # Leave headroom
-                    clip_gain = 0.95 / peak
-                    wav = wav * clip_gain
-                    print(f"  🔊 Applied anti-clipping gain: {clip_gain:.3f}")
-        
+    def _normalize_audio(self, wav, target_peak=0.95):
+        """
+        Simple peak normalization - just scales to target volume.
+        No clipping, no filtering, no processing - pure volume adjustment.
+        """
+        peak = np.abs(wav).max()
+        if peak > 0:
+            return wav * (target_peak / peak)
         return wav
+
 
     # --------------------------
     # Speech synthesis pipeline
@@ -183,7 +245,7 @@ Generate only the detailed voice description — do not add extra commentary."""
         # Tokenize description with proper attention mask
         tokenize_start = time.time()
         print("🔤 Tokenizing voice description...")
-        desc_inputs = self.desc_tokenizer(
+        desc_inputs_initial = self.desc_tokenizer(
             full_description,
             return_tensors="pt",
             padding=True,
@@ -191,10 +253,13 @@ Generate only the detailed voice description — do not add extra commentary."""
             max_length=256
         ).to(self.device)
         
-        # Ensure attention mask exists and validate sequence length
-        desc_inputs = self._ensure_attention_mask(desc_inputs)
-        desc_inputs = self._validate_sequence_length(desc_inputs, max_length=256)
-        print(f"✅ Description tokenized in {time.time() - tokenize_start:.3f}s (length: {desc_inputs['input_ids'].shape[-1]})")
+        # CRITICAL: Explicitly ensure attention mask exists
+        if "attention_mask" not in desc_inputs_initial:
+            desc_inputs_initial["attention_mask"] = torch.ones_like(desc_inputs_initial["input_ids"])
+        
+        desc_inputs_initial = self._validate_sequence_length(desc_inputs_initial, max_length=256)
+        print(f"✅ Description tokenized in {time.time() - tokenize_start:.3f}s (length: {desc_inputs_initial['input_ids'].shape[-1]})")
+        print(f"   Attention mask present: {'attention_mask' in desc_inputs_initial}, shape: {desc_inputs_initial['attention_mask'].shape if 'attention_mask' in desc_inputs_initial else 'N/A'}")
         
         # Fix random seed for reproducibility
         seed = 42
@@ -222,9 +287,14 @@ Generate only the detailed voice description — do not add extra commentary."""
                 truncation=True,
                 max_length=256
             ).to(self.device)
-            desc_inputs = self._ensure_attention_mask(desc_inputs)
+            
+            # CRITICAL: Explicitly ensure attention mask exists
+            if "attention_mask" not in desc_inputs:
+                desc_inputs["attention_mask"] = torch.ones_like(desc_inputs["input_ids"])
+            
             desc_inputs = self._validate_sequence_length(desc_inputs, 256)
             print(f"  🔤 Description tokenized in {time.time() - desc_token_start:.3f}s")
+            print(f"      Description attention_mask shape: {desc_inputs['attention_mask'].shape}")
             
             # Tokenize batch text
             text_token_start = time.time()
@@ -235,13 +305,18 @@ Generate only the detailed voice description — do not add extra commentary."""
                 truncation=True,
                 max_length=256
             ).to(self.device)
-            batch_inputs = self._ensure_attention_mask(batch_inputs)
+            
+            # CRITICAL: Explicitly ensure attention mask exists
+            if "attention_mask" not in batch_inputs:
+                batch_inputs["attention_mask"] = torch.ones_like(batch_inputs["input_ids"])
+                
             batch_inputs = self._validate_sequence_length(batch_inputs, 256)
             print(f"  📝 Text tokenized in {time.time() - text_token_start:.3f}s")
+            print(f"      Text attention_mask shape: {batch_inputs['attention_mask'].shape}")
 
             # Calculate safe max_new_tokens to prevent position overflow
             max_pos = getattr(self.model.config, 'max_position_embeddings', 4096)
-            current_len = max(desc_inputs.input_ids.shape[-1], batch_inputs.input_ids.shape[-1])
+            current_len = max(desc_inputs["input_ids"].shape[-1], batch_inputs["input_ids"].shape[-1])
             safe_max_tokens = min(8000, max_pos - current_len - 50)  # Leave buffer
             print(f"  📏 Max position: {max_pos}, Current length: {current_len}, Safe tokens: {safe_max_tokens}")
             
@@ -249,37 +324,91 @@ Generate only the detailed voice description — do not add extra commentary."""
                 print(f"⚠️ Input too long, skipping batch")
                 continue
 
-            # Generate audio with timing
+            # Generate audio with timing and GPU optimization
             generation_start = time.time()
             print(f"  🎵 Generating audio...")
+            
+            # Prepare inputs with proper attention masks
+            desc_input_ids = desc_inputs["input_ids"].repeat(len(batch), 1)
+            desc_attention_mask = desc_inputs["attention_mask"].repeat(len(batch), 1)
+            
+            # Debug: Verify attention masks before generation
+            print(f"      desc_input_ids shape: {desc_input_ids.shape}")
+            print(f"      desc_attention_mask shape: {desc_attention_mask.shape}")
+            print(f"      prompt_input_ids shape: {batch_inputs['input_ids'].shape}")
+            print(f"      prompt_attention_mask shape: {batch_inputs['attention_mask'].shape}")
+            
+            # Memory monitoring for GPU
+            if self.device.startswith("cuda"):
+                pre_gen_memory = torch.cuda.memory_allocated(0) / (1024**3)
+                print(f"    Pre-generation GPU memory: {pre_gen_memory:.2f}GB")
+            
             with torch.no_grad():
-                batch_audio = self.model.generate(
-                    input_ids=desc_inputs.input_ids.repeat(len(batch), 1),
-                    attention_mask=desc_inputs.attention_mask.repeat(len(batch), 1),
-                    prompt_input_ids=batch_inputs.input_ids,
-                    prompt_attention_mask=batch_inputs.attention_mask,
-                    do_sample=False,          # deterministic greedy decoding
-                    use_cache=True,
-                    max_new_tokens=safe_max_tokens,
-                )
+                # Use autocast for mixed precision on GPU
+                if self.use_mixed_precision and self.device.startswith("cuda"):
+                    with torch.autocast(device_type='cuda', dtype=torch.float16):
+                        batch_audio = self.model.generate(
+                            input_ids=desc_input_ids,
+                            attention_mask=desc_attention_mask,
+                            prompt_input_ids=batch_inputs["input_ids"],
+                            prompt_attention_mask=batch_inputs["attention_mask"],
+                            do_sample=True,           # CHANGED: Use sampling for better quality
+                            temperature=1.0,          # Control randomness
+                            use_cache=True,
+                            max_new_tokens=safe_max_tokens,
+                        )
+                else:
+                    batch_audio = self.model.generate(
+                        input_ids=desc_input_ids,
+                        attention_mask=desc_attention_mask,
+                        prompt_input_ids=batch_inputs["input_ids"],
+                        prompt_attention_mask=batch_inputs["attention_mask"],
+                        do_sample=True,           # CHANGED: Use sampling for better quality
+                        temperature=1.0,          # Control randomness
+                        use_cache=True,
+                        max_new_tokens=safe_max_tokens,
+                    )
+            
             generation_time = time.time() - generation_start
+            
+            # Post-generation memory check
+            if self.device.startswith("cuda"):
+                post_gen_memory = torch.cuda.memory_allocated(0) / (1024**3)
+                peak_memory = torch.cuda.max_memory_allocated(0) / (1024**3)
+                print(f"    Post-generation GPU memory: {post_gen_memory:.2f}GB (Peak: {peak_memory:.2f}GB)")
+                torch.cuda.empty_cache()  # Clean up
             print(f"  ✅ Audio generated in {generation_time:.2f}s")
 
-            # Post-process audio
+            # Post-process audio - model.generate() already returns decoded waveforms
             postprocess_start = time.time()
-            for wav in batch_audio.cpu().numpy():
+            
+            print(f"      Batch audio type: {type(batch_audio)}, shape: {batch_audio.shape}")
+            
+            # The generate() method already returns decoded audio waveforms, not codes
+            # No need for additional decoding
+            for idx, wav in enumerate(batch_audio.cpu().numpy()):
                 wav = wav.squeeze()
                 
-                # Check for problematic values
-                if np.any(np.isnan(wav)) or np.any(np.isinf(wav)):
-                    print(f"  ⚠️ Found NaN/Inf values, cleaning...")
-                    wav = np.nan_to_num(wav, nan=0.0, posinf=0.0, neginf=0.0)
+                # Debug: Check raw audio before normalization
+                print(f"      Raw audio {idx}: shape={wav.shape}, dtype={wav.dtype}")
+                print(f"      Raw audio stats: min={wav.min():.6f}, max={wav.max():.6f}, mean={wav.mean():.6f}, std={wav.std():.6f}")
                 
-                # Remove any DC offset
-                wav = wav - np.mean(wav)
+                # Check if audio is valid (not just zeros or constant)
+                if wav.std() < 0.001:  # Very low variation indicates a problem
+                    print(f"      WARNING: Audio {idx} has very low variation (std={wav.std():.6f})")
+                    print(f"      This indicates the model may not be generating proper speech.")
+                    print(f"      Possible causes:")
+                    print(f"        - Text/description mismatch with model training")
+                    print(f"        - Model not properly loaded")
+                    print(f"        - Incorrect generation parameters")
                 
-                # Apply gentle normalization
-                wav = self._normalize_rms(wav, target_db=-12.0, prevent_clipping=True)
+                # Don't normalize if audio is essentially flat
+                if wav.std() > 0.001:
+                    wav = self._normalize_audio(wav, target_peak=0.9)
+                    print(f"      Normalized audio {idx}: min={wav.min():.6f}, max={wav.max():.6f}, mean={wav.mean():.6f}, std={wav.std():.6f}")
+                else:
+                    print(f"      WARNING: Skipping normalization - audio is nearly flat/silent")
+                
                 audios.append(wav)
             postprocess_time = time.time() - postprocess_start
             
@@ -299,15 +428,20 @@ Generate only the detailed voice description — do not add extra commentary."""
             combined = audios[0]
             for clip in audios[1:]:
                 combined = np.concatenate([combined, silence, clip])
-                
-            # Final normalization to ensure consistent output level
-            combined = self._normalize_rms(combined, target_db=-12.0, prevent_clipping=True)
+            
+            # Final simple normalization for audibility
+            combined = self._normalize_audio(combined, target_peak=0.9)
+            
             print(f"✅ Audio merged in {time.time() - merge_start:.3f}s")
+            
+            # Audio level check
+            peak = np.abs(combined).max()
+            rms = np.sqrt(np.mean(combined ** 2))
+            print(f"📊 Final audio - Peak: {peak:.3f}, RMS: {rms:.4f}")
         else:
             print("❌ No audio clips to merge!")
             return None
-
-        # Ensure WAV output and save
+        # Ensure WAV output and save - NO PROCESSING
         save_start = time.time()
         if not output_path.endswith(".wav"):
             output_path += ".wav"
@@ -319,16 +453,9 @@ Generate only the detailed voice description — do not add extra commentary."""
         audio_duration = len(combined) / sr
         realtime_factor = audio_duration / total_time if total_time > 0 else 0
         
-        # Final audio analysis
-        final_peak = np.max(np.abs(combined))
-        final_rms = np.sqrt(np.mean(combined ** 2))
-        final_peak_db = 20 * np.log10(final_peak + 1e-10)
-        final_rms_db = 20 * np.log10(final_rms + 1e-10)
-        
         print(f"💾 Audio saved in {save_time:.3f}s")
         print(f"🎉 TTS synthesis completed!")
         print(f"📊 Total time: {total_time:.2f}s | Audio duration: {audio_duration:.1f}s | RTF: {realtime_factor:.2f}x")
-        print(f"🔊 Final audio levels: Peak={final_peak:.3f} ({final_peak_db:.1f}dB), RMS={final_rms:.3f} ({final_rms_db:.1f}dB)")
         print(f"✅ TTS audio saved at: {output_path}")
         return output_path
 
@@ -344,8 +471,6 @@ if __name__ == "__main__":
     text_input = (
         '''नमस्कार विद्यार्थियों,
 आज हम एक अत्यंत रोचक विषय पर चर्चा करने जा रहे हैं — स्मार्टफोन का हमारे जीवन पर प्रभाव﻿। पिछले एक दशक में, स्मार्टफोन ने हमारे जीवन के हर पहलू को बदल दिया है। संचार, शिक्षा, मनोरंजन, और व्यवसाय — हर क्षेत्र में इसकी भूमिका बढ़ती जा रही है।
-सबसे पहले बात करते हैं शिक्षा की। अब विद्यार्थी ऑनलाइन व्याख्यान सुन सकते हैं, नोट्स डाउनलोड कर सकते हैं, और दुनिया के किसी भी कोने से अध्ययन कर सकते हैं। यह तकनीकी क्रांति शिक्षा को अधिक सुलभ बना रही है।
-लेकिन इसके साथ ही हमें इसके नकारात्मक पक्ष को भी समझना चाहिए। स्मार्टफोन का अत्यधिक उपयोग हमारी एकाग्रता को कम करता है और आँखों पर बुरा प्रभाव डालता है। इसलिए तकनीक का संतुलित उपयोग ही हमारे लिए उचित है।
 अंत में, यही कहा जा सकता है कि स्मार्टफोन एक शक्तिशाली उपकरण है — यह हमें आगे भी ले जा सकता है या पीछे भी खींच सकता है, यह इस बात पर निर्भर करता है कि हम इसका उपयोग किस प्रकार करते हैं।'''
     )
 
@@ -356,3 +481,4 @@ Emotion: thoughtful and explanatory.
 Language: Hindi.'''
 
     tts_pipe.synthesize(text_input, voice_cue, "gemini_tts_output.wav")
+
