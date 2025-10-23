@@ -94,8 +94,9 @@ export GEMINI_API_KEY="your_gemini_api_key"
 $env:GEMINI_API_KEY = "your_gemini_api_key"
 ```
 
-2. Hugging Face authentication (for model downloads)  
-
+2. Hugging Face authentication (for model downloads)
+ 
+Type this in your terminal
 ```bash
 # Using the Hugging Face CLI
 huggingface-cli login
