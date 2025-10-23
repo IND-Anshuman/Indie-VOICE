@@ -13,10 +13,7 @@ from dotenv import load_dotenv
 
 # Load environment variables from .env file
 # Look for .env file in the backend directory
-import pathlib
-backend_root = pathlib.Path(__file__).parent.parent.parent
-env_path = backend_root / '.env'
-load_dotenv(env_path)
+
 
 
 class IndicTTSLLM:
@@ -31,7 +28,7 @@ class IndicTTSLLM:
         gemini_model="gemini-2.0-flash",
         batch_size=2,
         device=None,
-        gemini_api_key="GEMINI_API_KEY"
+        gemini_api_key=None
     ):
         start_time = time.time()
         print(f"🔹 [{datetime.now().strftime('%H:%M:%S')}] Starting TTS initialization...")
@@ -88,6 +85,8 @@ class IndicTTSLLM:
 
         # Initialize Gemini client
         gemini_start = time.time()
+        
+        load_dotenv() 
         gemini_api_key = gemini_api_key or os.getenv("GEMINI_API_KEY")
         if not gemini_api_key:
             raise ValueError("❌ Please set your GEMINI_API_KEY environment variable.")
@@ -464,8 +463,7 @@ Generate only the detailed voice description — do not add extra commentary."""
 # Example Usage
 # -------------------------------
 if __name__ == "__main__":
-    os.environ["GEMINI_API_KEY"] = "gemini_api_key"
-
+   
     tts_pipe = IndicTTSLLM(batch_size=2)
 
     text_input = (
