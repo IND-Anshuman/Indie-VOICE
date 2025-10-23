@@ -1,0 +1,15 @@
+
+# Install using:
+# pip install -r requirements.txt
+# Or install manually (single line):
+# pip install torch transformers soundfile numpy google-genai parler_tts python-dotenv
+
+# Core dependencies (one per line, pin versions as needed for reproducibility)
+torch
+transformers
+soundfile
+numpy
+google-genai
+git+https://github.com/huggingface/parler-tts.git
+python-dotenv
+
