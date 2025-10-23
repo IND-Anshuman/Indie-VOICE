@@ -104,6 +104,7 @@ hf auth login
 ```
 
 When prompted, paste your Hugging Face token from: https://huggingface.co/settings/tokens
+Also remember to get the access of Indic-Parler TTS model from Huggingface after setting up huggingface authentication
 
 ---
 
